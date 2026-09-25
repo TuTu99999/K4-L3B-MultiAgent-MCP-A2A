@@ -32,7 +32,11 @@ SHIPMENT_TOPICS = {
     "late_delivery_seller",
     "unsupported_claim",
 }
-PAYMENT_TIMELINE_TOPICS = {"payment_mismatch", "duplicate_charge"}
+PAYMENT_TIMELINE_TOPICS = {
+    "valid_split_payment",
+    "payment_mismatch",
+    "duplicate_charge",
+}
 REFUND_TIMELINE_TOPICS = {
     "refund_failed",
     "refund_pending",

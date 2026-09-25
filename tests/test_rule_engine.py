@@ -107,9 +107,12 @@ def test_rule_engine_keeps_claim_track_and_cross_checks_domain_evidence() -> Non
                     "canceled_order_paid": {
                         "case_status": "action_required",
                         "recommended_action": "issue_refund",
+                        "cause_code": "POLICY_CANCELED_CAPTURE",
+                        "refund_reason_code": "POLICY_CANCELED_REFUND",
                         "refund_brl": 97.0,
+                        "resolution_actions": ["issue_refund", "notify_customer"],
                         "responsible_parties": [
-                            {"party_type": "platform", "party_id": None}
+                            {"party_type": "platform", "party_id": "platform-policy"}
                         ],
                     },
                     "late_delivery_seller": {
@@ -151,6 +154,16 @@ def test_rule_engine_keeps_claim_track_and_cross_checks_domain_evidence() -> Non
     assert output["payment_analysis"]["captured_total_brl"] == 97.0
     assert output["payment_analysis"]["refundable_total_brl"] == 97.0
     assert output["financial_resolution"]["recommended_refund_brl"] == 97.0
+    assert output["financial_resolution"]["refund_lines"][0]["reason_code"] == (
+        "POLICY_CANCELED_REFUND"
+    )
+    assert output["root_cause_analysis"] == {
+        "ranked_causes": [{"cause_code": "POLICY_CANCELED_CAPTURE", "rank": 1}],
+        "responsible_parties": [
+            {"party_type": "platform", "party_id": "platform-policy"}
+        ],
+    }
+    assert output["resolution_actions"] == ["issue_refund", "notify_customer"]
     assert output["claim_assessments"][0]["verdict"] == "supported"
     assert output["claim_assessments"][1]["verdict"] == "supported"
     assert output["data_conflicts"]

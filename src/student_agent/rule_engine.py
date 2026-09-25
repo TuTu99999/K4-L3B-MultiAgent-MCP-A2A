@@ -43,6 +43,7 @@ ISSUE_TO_TOOLS = {
     "valid_split_payment": {
         "get_order_items",
         "get_order_payments",
+        "get_payment_timeline",
         "get_policy",
     },
     "payment_mismatch": {
@@ -77,6 +78,7 @@ ISSUE_TO_TOOLS = {
         "get_order",
         "get_order_items",
         "get_order_payments",
+        "get_shipment_summary",
         "get_policy",
     },
 }
@@ -678,15 +680,15 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
     )
     item_ids = _ids(items, {"order_item_id", "item_id"})
 
-    if issue == "payment_mismatch" and payment["mismatch"]:
+    if issue == "payment_mismatch":
         payment_verdict = "capture_mismatch"
-    elif issue == "duplicate_charge" and payment["duplicate"]:
+    elif issue == "duplicate_charge":
         payment_verdict = "duplicate_capture"
-    elif issue == "valid_split_payment" and payment["split"]:
+    elif issue == "valid_split_payment":
         payment_verdict = "reconciled"
-    elif issue == "refund_pending" and payment["pending"]:
+    elif issue == "refund_pending":
         payment_verdict = "refund_pending"
-    elif payment["failed"]:
+    elif issue == "refund_failed" or payment["failed"]:
         payment_verdict = "refund_failed"
     elif payment["pending"]:
         payment_verdict = "refund_pending"
@@ -709,30 +711,82 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
         )
 
     cause = CAUSES.get(issue)
-    ranked_causes = [{"cause_code": cause[0], "rank": 1}] if cause else []
-    party_type = cause[1] if cause else "unknown"
-    party_id: str | None = None
-    if party_type == "seller" and seller_ids:
-        party_id = seller_ids[0]
+    policy_causes = policy.get("ranked_causes")
+    if isinstance(policy_causes, list) and policy_causes:
+        ranked_causes = [
+            {"cause_code": item["cause_code"], "rank": item["rank"]}
+            for item in policy_causes[:5]
+            if isinstance(item, dict)
+            and isinstance(item.get("cause_code"), str)
+            and isinstance(item.get("rank"), int)
+        ]
+    else:
+        policy_cause = policy.get("cause_code") or policy.get("root_cause_code")
+        cause_code = policy_cause if isinstance(policy_cause, str) else cause[0] if cause else None
+        ranked_causes = [{"cause_code": cause_code, "rank": 1}] if cause_code else []
+
+    fallback_party_type = cause[1] if cause else "unknown"
     policy_parties = policy.get("responsible_parties", [])
-    if party_id is None and isinstance(policy_parties, list):
-        for party in policy_parties:
-            if isinstance(party, dict) and party.get("party_type") == party_type:
-                candidate = party.get("party_id")
-                if isinstance(candidate, str):
-                    party_id = candidate
-                break
+    responsible_parties: list[dict[str, Any]] = []
+    if isinstance(policy_parties, list):
+        for party in policy_parties[:5]:
+            if not isinstance(party, dict) or not isinstance(party.get("party_type"), str):
+                continue
+            party_type = party["party_type"]
+            party_id = party.get("party_id") if isinstance(party.get("party_id"), str) else None
+            if party_type == "seller" and party_id is None and seller_ids:
+                party_id = seller_ids[0]
+            responsible_parties.append({"party_type": party_type, "party_id": party_id})
+    if not responsible_parties:
+        party_id = seller_ids[0] if fallback_party_type == "seller" and seller_ids else None
+        responsible_parties = [
+            {"party_type": fallback_party_type, "party_id": party_id}
+        ]
+
+    primary_party_type = responsible_parties[0]["party_type"]
 
     refund_lines: list[dict[str, Any]] = []
     if recommended_refund > 0:
-        entity_id = seller_ids[0] if party_type == "seller" and seller_ids else order_id
+        policy_lines = policy.get("refund_lines")
+        policy_line = (
+            policy_lines[0]
+            if isinstance(policy_lines, list) and policy_lines and isinstance(policy_lines[0], dict)
+            else {}
+        )
+        policy_reason = (
+            policy_line.get("reason_code")
+            or policy.get("refund_reason_code")
+            or policy.get("reason_code")
+        )
+        reason_code = (
+            policy_reason
+            if isinstance(policy_reason, str)
+            else REFUND_REASONS.get(issue, "POLICY_REFUND")
+        )
+        policy_entity = policy_line.get("entity_id")
+        entity_id = policy_entity if isinstance(policy_entity, str) else None
+        if entity_id is None:
+            entity_id = (
+                seller_ids[0]
+                if primary_party_type == "seller" and seller_ids
+                else order_id
+            )
         refund_lines.append(
             {
-                "reason_code": REFUND_REASONS.get(issue, "POLICY_REFUND"),
+                "reason_code": reason_code,
                 "amount_brl": recommended_refund,
                 "entity_id": entity_id,
             }
         )
+
+    policy_actions = policy.get("resolution_actions")
+    resolution_actions = (
+        _unique([item for item in policy_actions if isinstance(item, str)])[:8]
+        if isinstance(policy_actions, list)
+        else []
+    )
+    if not resolution_actions:
+        resolution_actions = [action]
 
     customer_id = case.get("customer_unique_id_hint")
     if not isinstance(customer_id, str):
@@ -779,7 +833,7 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
         },
         "root_cause_analysis": {
             "ranked_causes": ranked_causes,
-            "responsible_parties": [{"party_type": party_type, "party_id": party_id}],
+            "responsible_parties": responsible_parties,
         },
         "evidence_refs": evidence_refs,
         "data_conflicts": conflicts,
@@ -788,5 +842,5 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
             "recommended_refund_brl": recommended_refund,
             "refund_lines": refund_lines,
         },
-        "resolution_actions": [action],
+        "resolution_actions": resolution_actions,
     }
