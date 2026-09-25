@@ -32,11 +32,10 @@ SHIPMENT_TOPICS = {
     "late_delivery_seller",
     "unsupported_claim",
 }
+PAYMENT_TIMELINE_TOPICS = {"payment_mismatch", "duplicate_charge"}
 REFUND_TIMELINE_TOPICS = {
-    "payment_mismatch",
     "refund_failed",
     "refund_pending",
-    "valid_split_payment",
 }
 _TOOL_CACHE: WeakKeyDictionary[EvidenceGateway, tuple[str, ...]] = WeakKeyDictionary()
 
@@ -116,29 +115,6 @@ def _claim_topics(case: dict[str, Any]) -> list[str]:
         for claim in claims
         if isinstance(claim, dict) and isinstance(claim.get("topic"), str)
     ]
-
-
-def _has_capture_event(record: dict[str, Any] | None) -> bool:
-    """Return whether a payment timeline can authoritatively supply the captured total."""
-    if not record:
-        return False
-
-    def contains_valid_capture(value: Any) -> bool:
-        if isinstance(value, dict):
-            event_type = str(value.get("event_type", "")).lower()
-            status = str(value.get("status", "")).lower()
-            is_capture = any(marker in event_type for marker in ("captur", "charge", "paid"))
-            is_valid = not any(
-                marker in status for marker in ("fail", "declin", "cancel", "revers")
-            )
-            if is_capture and is_valid:
-                return True
-            return any(contains_valid_capture(child) for child in value.values())
-        if isinstance(value, list):
-            return any(contains_valid_capture(child) for child in value)
-        return False
-
-    return contains_valid_capture(record.get("data"))
 
 
 def _handoff(
@@ -374,27 +350,19 @@ async def _payment_refund_agent(
 ) -> None:
     order_id = state.get("order_id")
     if order_id:
-        timeline_arguments = {"order_id": order_id}
-        calls = [("get_payment_timeline", timeline_arguments)]
+        topics = set(_claim_topics(state["case"]))
+        calls = [("get_order_payments", {"order_id": order_id})]
+        if PAYMENT_TIMELINE_TOPICS.intersection(topics):
+            calls.append(("get_payment_timeline", {"order_id": order_id}))
         if REFUND_TIMELINE_TOPICS.intersection(_claim_topics(state["case"])):
             calls.append(("get_refund_timeline", {"order_id": order_id}))
-        records = await _collect_batch(
+        await _collect_batch(
             state=state,
             gateway=gateway,
             trace=trace,
             actor="payment-refund-agent",
             calls=calls,
         )
-        timeline = records.get(_cache_key("get_payment_timeline", timeline_arguments))
-        if not _has_capture_event(timeline):
-            await _collect_evidence(
-                state=state,
-                gateway=gateway,
-                trace=trace,
-                actor="payment-refund-agent",
-                tool_name="get_order_payments",
-                arguments={"order_id": order_id},
-            )
     _handoff(
         trace,
         state["case"]["case_id"],

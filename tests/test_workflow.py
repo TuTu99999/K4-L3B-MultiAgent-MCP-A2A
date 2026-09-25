@@ -130,43 +130,6 @@ def test_workflow_fails_fast_without_order_evidence(
     assert gateway.calls == 1
 
 
-class MissingCaptureGateway(FakeGateway):
-    async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
-        result = await super().call(tool_name, case_id=case_id, **arguments)
-        if tool_name == "get_payment_timeline":
-            result["data"] = {"events": []}
-        return result
-
-
-def test_order_payments_is_only_a_missing_timeline_fallback(tmp_path: Path) -> None:
-    gateway = MissingCaptureGateway()
-    trace = TraceWriter(tmp_path / "trace.jsonl", contracts())
-    case = {
-        "case_id": "CASE_FALLBACK",
-        "candidate_order_ids": ["a" * 32],
-        "customer_unique_id_hint": "CUSTOMER_1",
-        "policy_version": "EC_POLICY_V2",
-        "customer_request": {"claims": []},
-    }
-
-    asyncio.run(workflow.solve_case(case, gateway, trace))
-
-    assert gateway.called_tools.count("get_payment_timeline") == 1
-    assert gateway.called_tools.count("get_order_payments") == 1
-
-
-def test_failed_capture_event_does_not_disable_payment_fallback() -> None:
-    record = {
-        "data": {
-            "events": [
-                {"event_type": "capture", "status": "failed", "amount_brl": 100.0}
-            ]
-        }
-    }
-
-    assert not workflow._has_capture_event(record)
-
-
 def test_synthetic_order_candidate_is_rejected_without_mcp_call(tmp_path: Path) -> None:
     gateway = FakeGateway()
     trace = TraceWriter(tmp_path / "trace.jsonl", contracts())
@@ -186,7 +149,8 @@ def test_synthetic_order_candidate_is_rejected_without_mcp_call(tmp_path: Path) 
     assert "candidate-001" in output["entity_resolution"]["rejected_candidates"]
     assert gateway.sequence == 6
     assert "get_refund_timeline" not in gateway.called_tools
-    assert "get_order_payments" not in gateway.called_tools
+    assert "get_payment_timeline" not in gateway.called_tools
+    assert gateway.called_tools.count("get_order_payments") == 1
 
 
 def test_seller_hypothesis_collects_shipment_without_redundant_seller_call(

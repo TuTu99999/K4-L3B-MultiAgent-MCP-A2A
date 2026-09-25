@@ -19,16 +19,14 @@ ISSUE_TO_TOOLS = {
     "canceled_order_paid": {
         "get_order",
         "get_order_items",
-        "get_payment_timeline",
-        "get_refund_timeline",
+        "get_order_payments",
         "get_policy",
     },
     "unavailable_order_paid": {
         "get_order",
         "get_order_items",
         "get_product_context",
-        "get_payment_timeline",
-        "get_refund_timeline",
+        "get_order_payments",
         "get_policy",
     },
     "late_delivery_seller": {
@@ -44,41 +42,41 @@ ISSUE_TO_TOOLS = {
     },
     "valid_split_payment": {
         "get_order_items",
-        "get_payment_timeline",
+        "get_order_payments",
         "get_policy",
     },
     "payment_mismatch": {
         "get_order_items",
+        "get_order_payments",
         "get_payment_timeline",
         "get_policy",
     },
     "duplicate_charge": {
         "get_order_items",
+        "get_order_payments",
         "get_payment_timeline",
-        "get_refund_timeline",
         "get_policy",
     },
     "refund_pending": {
-        "get_payment_timeline",
+        "get_order_payments",
         "get_refund_timeline",
         "get_policy",
     },
     "refund_failed": {
-        "get_payment_timeline",
+        "get_order_payments",
         "get_refund_timeline",
         "get_policy",
     },
     "requested_full_refund": {
         "get_order_items",
-        "get_payment_timeline",
+        "get_order_payments",
         "get_refund_timeline",
         "get_policy",
     },
     "unsupported_claim": {
         "get_order",
-        "get_shipment_summary",
-        "get_payment_timeline",
-        "get_refund_timeline",
+        "get_order_items",
+        "get_order_payments",
         "get_policy",
     },
 }
@@ -258,17 +256,14 @@ def _payment_facts(state: dict[str, Any], items: list[dict[str, Any]]) -> dict[s
     payment_events = _top_list(timeline, "events")
     refund_events = _top_list(refund_data, "events")
 
-    captures = _event_amounts(payment_events, "capture")
-    if captures:
-        captured = round(sum(captures), 2)
-    else:
-        fallback = [
-            amount
-            for amount in (_number(payment.get("payment_value")) for payment in payments)
-            if amount is not None
-        ]
-        captures = fallback
-        captured = round(sum(fallback), 2) if fallback else None
+    payment_amounts = [
+        amount
+        for amount in (_number(payment.get("payment_value")) for payment in payments)
+        if amount is not None
+    ]
+    timeline_captures = _event_amounts(payment_events, "capture")
+    captures = payment_amounts or timeline_captures
+    captured = round(sum(captures), 2) if captures else None
 
     refund_amounts = _event_amounts(refund_events, "refund")
     refunded = round(sum(refund_amounts), 2) if refund_amounts else 0.0
@@ -464,7 +459,8 @@ def _supported_topics(
     return result
 
 
-def _supported_primary_claim(case: dict[str, Any], supported_topics: set[str]) -> str | None:
+def _primary_claim_topic(case: dict[str, Any]) -> str | None:
+    """Return the dispute track; evidence still controls all domain analyses."""
     claims = case.get("customer_request", {}).get("claims", [])
     if not isinstance(claims, list):
         return None
@@ -474,7 +470,8 @@ def _supported_primary_claim(case: dict[str, Any], supported_topics: set[str]) -
         topic = claim.get("topic")
         if topic == "requested_full_refund":
             continue
-        return topic if isinstance(topic, str) and topic in supported_topics else None
+        if isinstance(topic, str) and topic in ISSUE_TO_TOOLS:
+            return topic
     return None
 
 
@@ -594,9 +591,9 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
     payment = _payment_facts(state, items)
     issue, confidence = _detect_issue(case, order, payment, shipment, product_data)
     supported_topics = _supported_topics(order, payment, shipment, product_data)
-    supported_claim = _supported_primary_claim(case, supported_topics)
-    if supported_claim is not None:
-        issue, confidence = supported_claim, 0.9
+    primary_claim = _primary_claim_topic(case)
+    if primary_claim is not None:
+        issue, confidence = primary_claim, 0.9
     if resolution.get("status") != "resolved":
         issue, confidence = "insufficient_evidence", 0.2
 
@@ -609,7 +606,7 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
         recommended_refund = 0.0
 
     conflicts = _conflicts(items, payment["captured"])
-    if supported_claim is not None:
+    if primary_claim is not None:
         if any(topic != issue for topic in supported_topics):
             confidence = min(confidence, 0.86)
         if any(conflict.get("selected_source") is None for conflict in conflicts):
@@ -665,7 +662,9 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
         evidence_refs.extend(assessment["evidence_refs"])
     # Entity resolution and customer context are part of the submitted
     # conclusion, so retain their authoritative history evidence as well.
-    evidence_refs.extend(_refs_for_tools(state, {"get_customer_history"}))
+    evidence_refs.extend(
+        _refs_for_tools(state, {"get_order", "get_customer_history", "get_shipment_summary"})
+    )
     evidence_refs = _unique(evidence_refs)[:30]
 
     history = _data(state, "get_customer_history")
@@ -679,7 +678,15 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
     )
     item_ids = _ids(items, {"order_item_id", "item_id"})
 
-    if payment["failed"]:
+    if issue == "payment_mismatch" and payment["mismatch"]:
+        payment_verdict = "capture_mismatch"
+    elif issue == "duplicate_charge" and payment["duplicate"]:
+        payment_verdict = "duplicate_capture"
+    elif issue == "valid_split_payment" and payment["split"]:
+        payment_verdict = "reconciled"
+    elif issue == "refund_pending" and payment["pending"]:
+        payment_verdict = "refund_pending"
+    elif payment["failed"]:
         payment_verdict = "refund_failed"
     elif payment["pending"]:
         payment_verdict = "refund_pending"

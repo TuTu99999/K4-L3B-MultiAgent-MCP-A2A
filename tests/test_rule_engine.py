@@ -7,7 +7,7 @@ from typing import Any
 
 from student_agent.contracts import Contracts
 from student_agent.reasoning import normalize_draft, verify_output
-from student_agent.rule_engine import _supported_primary_claim, generate_rule_draft
+from student_agent.rule_engine import _primary_claim_topic, generate_rule_draft
 
 
 def _evidence(tool_name: str, sequence: int, data: Any) -> dict[str, Any]:
@@ -22,7 +22,7 @@ def _evidence(tool_name: str, sequence: int, data: Any) -> dict[str, Any]:
     }
 
 
-def test_primary_claim_is_preferred_only_when_evidence_supports_it() -> None:
+def test_first_business_claim_selects_the_dispute_track() -> None:
     case = {
         "customer_request": {
             "claims": [
@@ -32,13 +32,10 @@ def test_primary_claim_is_preferred_only_when_evidence_supports_it() -> None:
         }
     }
 
-    assert _supported_primary_claim(case, {"payment_mismatch", "refund_pending"}) == (
-        "payment_mismatch"
-    )
-    assert _supported_primary_claim(case, {"refund_pending"}) is None
+    assert _primary_claim_topic(case) == "payment_mismatch"
 
 
-def test_rule_engine_detects_actual_issue_instead_of_claim_topic() -> None:
+def test_rule_engine_keeps_claim_track_and_cross_checks_domain_evidence() -> None:
     order_id = "order-018"
     seller_id = "seller-018"
     case = {
@@ -97,6 +94,8 @@ def test_rule_engine_detects_actual_issue_instead_of_claim_topic() -> None:
                 "events": [
                     {"event_type": "captured", "amount_brl": "18.00", "status": "confirmed"},
                     {"event_type": "captured", "amount_brl": "79.00", "status": "confirmed"},
+                    {"event_type": "captured", "amount_brl": "18.00", "status": "confirmed"},
+                    {"event_type": "captured", "amount_brl": "79.00", "status": "confirmed"},
                 ]
             },
         ),
@@ -105,6 +104,14 @@ def test_rule_engine_detects_actual_issue_instead_of_claim_topic() -> None:
             6,
             {
                 "rules": {
+                    "canceled_order_paid": {
+                        "case_status": "action_required",
+                        "recommended_action": "issue_refund",
+                        "refund_brl": 97.0,
+                        "responsible_parties": [
+                            {"party_type": "platform", "party_id": None}
+                        ],
+                    },
                     "late_delivery_seller": {
                         "case_status": "action_required",
                         "recommended_action": "refund_freight",
@@ -135,7 +142,7 @@ def test_rule_engine_detects_actual_issue_instead_of_claim_topic() -> None:
 
     assert verify_output(output, state, contracts) == []
     assert output["assessment"] == {
-        "primary_issue": "late_delivery_seller",
+        "primary_issue": "canceled_order_paid",
         "secondary_issues": ["requested_full_refund"],
         "case_status": "action_required",
         "confidence": 0.82,
@@ -143,9 +150,9 @@ def test_rule_engine_detects_actual_issue_instead_of_claim_topic() -> None:
     assert output["shipment_analysis"]["late_seller_ids"] == [seller_id]
     assert output["payment_analysis"]["captured_total_brl"] == 97.0
     assert output["payment_analysis"]["refundable_total_brl"] == 97.0
-    assert output["financial_resolution"]["recommended_refund_brl"] == 18.0
-    assert output["claim_assessments"][0]["verdict"] == "unsupported"
-    assert output["claim_assessments"][1]["verdict"] == "partially_supported"
+    assert output["financial_resolution"]["recommended_refund_brl"] == 97.0
+    assert output["claim_assessments"][0]["verdict"] == "supported"
+    assert output["claim_assessments"][1]["verdict"] == "supported"
     assert output["data_conflicts"]
 
     inconsistent = copy.deepcopy(output)
@@ -153,7 +160,7 @@ def test_rule_engine_detects_actual_issue_instead_of_claim_topic() -> None:
         {"party_type": "logistics_provider", "party_id": None}
     ]
     assert any(
-        "requires responsible party seller" in error
+        "requires responsible party platform" in error
         for error in verify_output(inconsistent, state, contracts)
     )
 

@@ -39,7 +39,7 @@ toàn deterministic và không gửi case/evidence ra dịch vụ LLM.
 | Entity/customer | Xác minh candidate và customer history | `get_order`, `get_customer_history` |
 | Order/product | Thu item, seller và product context | `get_order_items`; `get_product_context` theo product hypothesis |
 | Shipment | Thu timeline và phân loại giao hàng | `get_shipment_summary` |
-| Payment/refund | Đối soát capture và refund lifecycle | `get_payment_timeline`, `get_refund_timeline`; `get_order_payments` là fallback |
+| Payment/refund | Đối soát capture và refund lifecycle | `get_order_payments`; timeline tương ứng chỉ gọi theo payment/refund hypothesis |
 | Policy | Lấy chính sách có thẩm quyền | `get_policy` |
 | Rule engine | Tổng hợp deterministic từ case memory | Không gọi MCP |
 | Verifier | Schema, provenance và consistency | Không gọi MCP |
@@ -89,11 +89,11 @@ request và public contract không thay đổi.
 
 Rule engine ưu tiên dữ liệu có thẩm quyền theo thứ tự:
 
-1. refund/payment lifecycle event;
+1. payment record cho số tiền capture và refund lifecycle event cho trạng thái hoàn tiền;
 2. order status và item totals;
 3. shipment timeline/actor;
 4. policy rule từ `get_policy`;
-5. customer claim chỉ là hypothesis, không phải bằng chứng.
+5. customer claim chọn dispute track cần phân xử, nhưng không thay thế bằng chứng cho các domain analysis.
 
 Các issue được phát hiện từ evidence gồm canceled/unavailable order đã thanh toán, seller hoặc
 logistics delay, payment mismatch, duplicate charge, refund pending/failed, valid split payment và
@@ -114,9 +114,9 @@ luôn bằng `recommended_refund_brl`.
 Independent calls trong cùng specialist chạy song song và cache ngăn gọi lặp. Decoy đã định danh
 dạng `candidate-NNN` được ghi nhận là rejected nhưng không tiêu tốn call; các định dạng ID khác vẫn
 được MCP xác minh để không overfit private set. Evidence planner lấy order, history, items, payment
-timeline và policy làm lõi; product, shipment và refund timeline chỉ lấy khi hypothesis cần đúng
-domain đó. `get_order_payments` chỉ chạy khi payment timeline không có capture event. Với bundle hiện
-tại, planner dùng 5 hoặc 6 MCP calls mỗi case, trung bình 5.9; shipment verdict không tranh chấp có
+record và policy làm lõi; product, shipment, payment timeline và refund timeline chỉ lấy khi
+hypothesis cần đúng domain đó. Với bundle hiện tại, planner dùng 5 hoặc 6 MCP calls mỗi case, trung
+bình 5.7; shipment verdict không tranh chấp có
 thể suy ra từ delivery dates trong order evidence.
 Chỉ timeout/lỗi transport được retry một lần với exponential backoff; generic tool error không retry.
 
