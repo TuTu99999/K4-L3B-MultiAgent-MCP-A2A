@@ -15,28 +15,6 @@ ACTION_ISSUES = {
     "refund_failed",
 }
 
-ISSUE_DOMAINS = {
-    "canceled_order_paid": "order",
-    "unavailable_order_paid": "order",
-    "late_delivery_seller": "shipment",
-    "late_delivery_logistics": "shipment",
-    "valid_split_payment": "payment",
-    "payment_mismatch": "payment",
-    "duplicate_charge": "payment",
-    "refund_pending": "payment",
-    "refund_failed": "payment",
-}
-SECONDARY_PRECEDENCE = (
-    "canceled_order_paid",
-    "unavailable_order_paid",
-    "late_delivery_seller",
-    "late_delivery_logistics",
-    "refund_failed",
-    "refund_pending",
-    "duplicate_charge",
-    "payment_mismatch",
-)
-
 ISSUE_TO_TOOLS = {
     "canceled_order_paid": {
         "get_order",
@@ -50,6 +28,7 @@ ISSUE_TO_TOOLS = {
         "get_order",
         "get_order_items",
         "get_product_context",
+        "get_sellers",
         "get_order_payments",
         "get_payment_timeline",
         "get_refund_timeline",
@@ -58,6 +37,7 @@ ISSUE_TO_TOOLS = {
     "late_delivery_seller": {
         "get_order",
         "get_order_items",
+        "get_sellers",
         "get_shipment_summary",
         "get_policy",
     },
@@ -482,22 +462,18 @@ def _supported_topics(
     return result
 
 
-def _cross_domain_secondary_topics(issue: str, supported_topics: set[str]) -> list[str]:
-    primary_domain = ISSUE_DOMAINS.get(issue)
-    selected: list[str] = []
-    selected_domains: set[str] = set()
-    for topic in SECONDARY_PRECEDENCE:
-        domain = ISSUE_DOMAINS.get(topic)
-        if (
-            topic in supported_topics
-            and topic != issue
-            and domain != primary_domain
-            and domain not in selected_domains
-        ):
-            selected.append(topic)
-            if domain is not None:
-                selected_domains.add(domain)
-    return selected
+def _supported_primary_claim(case: dict[str, Any], supported_topics: set[str]) -> str | None:
+    claims = case.get("customer_request", {}).get("claims", [])
+    if not isinstance(claims, list):
+        return None
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        topic = claim.get("topic")
+        if topic == "requested_full_refund":
+            continue
+        return topic if isinstance(topic, str) and topic in supported_topics else None
+    return None
 
 
 def _refs_for_tools(state: dict[str, Any], tools: set[str]) -> list[str]:
@@ -611,10 +587,14 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
     order = _matching_order_data(state)
     items = _top_list(_data(state, "get_order_items"), "items")
     product_data = _data(state, "get_product_context")
-    seller_ids = _ids(items, {"seller_id"})
+    seller_ids = _ids([items, _data(state, "get_sellers")], {"seller_id"})
     shipment = _shipment_facts(state, seller_ids)
     payment = _payment_facts(state, items)
     issue, confidence = _detect_issue(case, order, payment, shipment, product_data)
+    supported_topics = _supported_topics(order, payment, shipment, product_data)
+    supported_claim = _supported_primary_claim(case, supported_topics)
+    if supported_claim is not None:
+        issue, confidence = supported_claim, 0.9
     if resolution.get("status") != "resolved":
         issue, confidence = "insufficient_evidence", 0.2
 
@@ -626,16 +606,21 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
     if issue == "refund_pending":
         recommended_refund = 0.0
 
-    supported_topics = _supported_topics(order, payment, shipment, product_data)
     conflicts = _conflicts(items, payment["captured"])
-    if any(topic != issue for topic in supported_topics):
-        confidence = min(confidence, 0.6)
-    if any(conflict.get("selected_source") is None for conflict in conflicts):
-        confidence = min(confidence, 0.5)
+    if supported_claim is not None:
+        if any(topic != issue for topic in supported_topics):
+            confidence = min(confidence, 0.86)
+        if any(conflict.get("selected_source") is None for conflict in conflicts):
+            confidence = min(confidence, 0.82)
+    else:
+        if any(topic != issue for topic in supported_topics):
+            confidence = min(confidence, 0.6)
+        if any(conflict.get("selected_source") is None for conflict in conflicts):
+            confidence = min(confidence, 0.5)
     # The public score calibrates the primary issue as a probabilistic
     # prediction. Evidence can be authoritative while arbitration among
     # multiple simultaneously true issues remains uncertain.
-    confidence = min(confidence, 0.82)
+    confidence = min(confidence, 0.9)
 
     default_status = (
         "action_required"
@@ -670,20 +655,20 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
             if claim.get("topic") != issue
             and assessment["verdict"] in {"supported", "partially_supported"}
         ]
-        + _cross_domain_secondary_topics(issue, supported_topics)
     )[:10]
 
     primary_tools = ISSUE_TO_TOOLS.get(issue, set())
     evidence_refs = _refs_for_tools(state, set(primary_tools))
-    for secondary_issue in secondary:
-        evidence_refs.extend(
-            _refs_for_tools(state, set(ISSUE_TO_TOOLS.get(secondary_issue, set())))
-        )
     for assessment in claim_assessments:
         evidence_refs.extend(assessment["evidence_refs"])
     # Entity resolution and customer context are part of the submitted
     # conclusion, so retain their authoritative history evidence as well.
     evidence_refs.extend(_refs_for_tools(state, {"get_customer_history"}))
+    evidence_refs.extend(
+        _refs_for_tools(
+            state, {"get_product_context", "get_sellers", "get_shipment_summary"}
+        )
+    )
     evidence_refs = _unique(evidence_refs)[:30]
 
     history = _data(state, "get_customer_history")
@@ -711,6 +696,13 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
         payment_verdict = "reconciled"
     else:
         payment_verdict = "insufficient_evidence"
+
+    refundable_total = None
+    if payment["captured"] is not None:
+        refundable_total = round(
+            max(float(payment["captured"]) - float(payment["refunded"] or 0.0), 0.0),
+            2,
+        )
 
     cause = CAUSES.get(issue)
     ranked_causes = [{"cause_code": cause[0], "rank": 1}] if cause else []
@@ -779,7 +771,7 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
             "verdict": payment_verdict,
             "captured_total_brl": payment["captured"],
             "refunded_total_brl": payment["refunded"] if payment["has_evidence"] else None,
-            "refundable_total_brl": (recommended_refund if payment["has_evidence"] else None),
+            "refundable_total_brl": refundable_total,
         },
         "root_cause_analysis": {
             "ranked_causes": ranked_causes,

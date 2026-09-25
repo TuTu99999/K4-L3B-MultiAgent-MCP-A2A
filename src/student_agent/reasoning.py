@@ -317,6 +317,18 @@ def verify_output(value: dict[str, Any], state: dict[str, Any], contracts: Contr
             if status == "no_action" and float(total) > 0:
                 errors.append("consistency:no_action cannot recommend a positive refund")
 
+    payment = value.get("payment_analysis", {})
+    if isinstance(payment, dict):
+        captured = payment.get("captured_total_brl")
+        refunded = payment.get("refunded_total_brl")
+        refundable = payment.get("refundable_total_brl")
+        if all(isinstance(item, (int, float)) for item in (captured, refunded, refundable)):
+            expected_refundable = max(float(captured) - float(refunded), 0.0)
+            if not math.isclose(float(refundable), expected_refundable, abs_tol=0.01):
+                errors.append(
+                    "financial:refundable total must equal captured minus refunded"
+                )
+
     entities = value.get("affected_entities", {})
     shipment = value.get("shipment_analysis", {})
     if isinstance(entities, dict) and isinstance(shipment, dict):

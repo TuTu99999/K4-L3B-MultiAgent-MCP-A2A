@@ -140,5 +140,25 @@ def test_synthetic_order_candidate_is_rejected_without_mcp_call(tmp_path: Path) 
     output = asyncio.run(workflow.solve_case(case, gateway, trace))
 
     assert "candidate-001" in output["entity_resolution"]["rejected_candidates"]
-    assert gateway.sequence == 7
+    assert gateway.sequence == 8
     assert "get_refund_timeline" not in gateway.called_tools
+
+
+def test_seller_hypothesis_collects_seller_evidence(tmp_path: Path) -> None:
+    gateway = FakeGateway()
+    trace = TraceWriter(tmp_path / "trace.jsonl", contracts())
+    case = {
+        "case_id": "CASE_002",
+        "candidate_order_ids": ["b" * 32],
+        "customer_unique_id_hint": "CUSTOMER_2",
+        "policy_version": "EC_POLICY_V2",
+        "customer_request": {
+            "claimed_order_id": "b" * 32,
+            "claims": [{"claim_id": "CLAIM_2", "topic": "late_delivery_seller"}],
+        },
+    }
+
+    asyncio.run(workflow.solve_case(case, gateway, trace))
+
+    assert gateway.called_tools.count("get_sellers") == 1
+    assert gateway.sequence == 9

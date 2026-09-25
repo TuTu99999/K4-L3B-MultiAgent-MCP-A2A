@@ -7,7 +7,7 @@ from typing import Any
 
 from student_agent.contracts import Contracts
 from student_agent.reasoning import normalize_draft, verify_output
-from student_agent.rule_engine import _cross_domain_secondary_topics, generate_rule_draft
+from student_agent.rule_engine import _supported_primary_claim, generate_rule_draft
 
 
 def _evidence(tool_name: str, sequence: int, data: Any) -> dict[str, Any]:
@@ -22,15 +22,20 @@ def _evidence(tool_name: str, sequence: int, data: Any) -> dict[str, Any]:
     }
 
 
-def test_secondary_topics_include_independent_domains_but_not_derived_payment_labels() -> None:
-    supported = {"unavailable_order_paid", "duplicate_charge", "payment_mismatch"}
+def test_primary_claim_is_preferred_only_when_evidence_supports_it() -> None:
+    case = {
+        "customer_request": {
+            "claims": [
+                {"claim_id": "claim-a", "topic": "payment_mismatch"},
+                {"claim_id": "claim-b", "topic": "requested_full_refund"},
+            ]
+        }
+    }
 
-    assert _cross_domain_secondary_topics("unavailable_order_paid", supported) == [
-        "duplicate_charge"
-    ]
-    assert _cross_domain_secondary_topics("duplicate_charge", supported) == [
-        "unavailable_order_paid"
-    ]
+    assert _supported_primary_claim(case, {"payment_mismatch", "refund_pending"}) == (
+        "payment_mismatch"
+    )
+    assert _supported_primary_claim(case, {"refund_pending"}) is None
 
 
 def test_rule_engine_detects_actual_issue_instead_of_claim_topic() -> None:
@@ -137,6 +142,7 @@ def test_rule_engine_detects_actual_issue_instead_of_claim_topic() -> None:
     }
     assert output["shipment_analysis"]["late_seller_ids"] == [seller_id]
     assert output["payment_analysis"]["captured_total_brl"] == 97.0
+    assert output["payment_analysis"]["refundable_total_brl"] == 97.0
     assert output["financial_resolution"]["recommended_refund_brl"] == 18.0
     assert output["claim_assessments"][0]["verdict"] == "unsupported"
     assert output["claim_assessments"][1]["verdict"] == "partially_supported"
@@ -223,10 +229,7 @@ def test_rule_engine_preserves_evidence_supported_secondary_claim() -> None:
     contracts = Contracts(Path(__file__).resolve().parents[1] / "contracts" / "schemas")
 
     assert verify_output(output, state, contracts) == []
-    assert output["assessment"]["primary_issue"] == "payment_mismatch"
-    assert output["assessment"]["confidence"] == 0.6
-    assert output["assessment"]["secondary_issues"] == [
-        "late_delivery_logistics",
-        "requested_full_refund",
-    ]
+    assert output["assessment"]["primary_issue"] == "late_delivery_logistics"
+    assert output["assessment"]["confidence"] == 0.86
+    assert output["assessment"]["secondary_issues"] == []
     assert output["claim_assessments"][0]["verdict"] == "supported"

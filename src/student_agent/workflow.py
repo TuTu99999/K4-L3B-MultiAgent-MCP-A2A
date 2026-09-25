@@ -20,23 +20,22 @@ REQUIRED_TOOLS = {
     "get_policy",
     "get_product_context",
     "get_refund_timeline",
+    "get_sellers",
     "get_shipment_summary",
 }
 MAX_VERIFICATION_ATTEMPTS = 2
 MAX_MCP_ATTEMPTS = 2
 SYNTHETIC_CANDIDATE_PATTERN = re.compile(r"^candidate-\d+$", re.IGNORECASE)
-PRODUCT_TOPICS = {"unavailable_order_paid"}
-SHIPMENT_TOPICS = {
-    "canceled_order_paid",
-    "late_delivery_logistics",
-    "late_delivery_seller",
-    "unsupported_claim",
-}
 REFUND_TIMELINE_TOPICS = {
     "payment_mismatch",
     "refund_failed",
     "refund_pending",
     "valid_split_payment",
+}
+SELLER_TOPICS = {
+    "canceled_order_paid",
+    "late_delivery_seller",
+    "unavailable_order_paid",
 }
 _TOOL_CACHE: WeakKeyDictionary[EvidenceGateway, tuple[str, ...]] = WeakKeyDictionary()
 
@@ -305,9 +304,12 @@ async def _order_product_agent(
 ) -> None:
     order_id = state.get("order_id")
     if order_id:
-        calls = [("get_order_items", {"order_id": order_id})]
-        if PRODUCT_TOPICS.intersection(_claim_topics(state["case"])):
-            calls.append(("get_product_context", {"order_id": order_id}))
+        calls = [
+            ("get_order_items", {"order_id": order_id}),
+            ("get_product_context", {"order_id": order_id}),
+        ]
+        if SELLER_TOPICS.intersection(_claim_topics(state["case"])):
+            calls.append(("get_sellers", {"order_id": order_id}))
         await _collect_batch(
             state=state,
             gateway=gateway,
@@ -328,7 +330,7 @@ async def _shipment_agent(
     state: WorkflowState, gateway: EvidenceGateway, trace: TraceWriter
 ) -> None:
     order_id = state.get("order_id")
-    if order_id and SHIPMENT_TOPICS.intersection(_claim_topics(state["case"])):
+    if order_id:
         await _collect_evidence(
             state=state,
             gateway=gateway,

@@ -37,7 +37,7 @@ toàn deterministic và không gửi case/evidence ra dịch vụ LLM.
 | --- | --- | --- |
 | Coordinator | Tạo plan/hypothesis code, handoff hữu hạn | Không gọi evidence tool |
 | Entity/customer | Xác minh candidate và customer history | `get_order`, `get_customer_history` |
-| Order/product | Thu item, seller và product context | `get_order_items`, `get_product_context` |
+| Order/product | Thu item, seller và product context | `get_order_items`, `get_product_context`, `get_sellers` theo seller hypothesis |
 | Shipment | Thu timeline và phân loại giao hàng | `get_shipment_summary` |
 | Payment/refund | Đối soát capture và refund lifecycle | `get_order_payments`, `get_payment_timeline`, `get_refund_timeline` |
 | Policy | Lấy chính sách có thẩm quyền | `get_policy` |
@@ -45,8 +45,8 @@ toàn deterministic và không gửi case/evidence ra dịch vụ LLM.
 | Verifier | Schema, provenance và consistency | Không gọi MCP |
 
 Mọi tool phải xuất hiện trong kết quả discovery. Không actor nào được tự đoán tool hoặc mở rộng
-scope. `get_sellers` không cần gọi riêng vì seller ID được lấy từ order items, giúp giữ budget tối
-đa 10 MCP calls với case hai candidate.
+scope. `get_sellers` chỉ được gọi khi hypothesis có khả năng quy trách nhiệm seller, thay vì gọi cho
+mọi case.
 
 ## 3. Think, memory và loop
 
@@ -114,10 +114,11 @@ luôn bằng `recommended_refund_brl`.
 
 Independent calls trong cùng specialist chạy song song và cache ngăn gọi lặp. Decoy đã định danh
 dạng `candidate-NNN` được ghi nhận là rejected nhưng không tiêu tốn call; các định dạng ID khác vẫn
-được MCP xác minh để không overfit private set. Evidence planner luôn lấy order, history, items, payment/refund
-và policy; product chỉ lấy cho hypothesis unavailable, shipment chỉ lấy cho hypothesis giao
-hàng/canceled/unsupported, và refund timeline chỉ lấy cho nhóm payment/refund có lifecycle tương ứng.
-Bộ L3B hiện tại dùng 6 hoặc 7 MCP calls mỗi case, trung bình 6.9.
+được MCP xác minh để không overfit private set. Evidence planner luôn lấy order, history, items,
+product, shipment, payment và policy theo investigation scope; refund timeline chỉ lấy cho nhóm
+payment/refund có lifecycle tương ứng; seller record chỉ lấy cho seller-related hypothesis. Bộ L3B
+hiện tại dùng 8 hoặc 9 MCP calls mỗi case, trung bình 8.7, đổi một phần điểm efficiency để tăng
+semantic completeness và required evidence coverage.
 Chỉ timeout/lỗi transport được retry một lần với exponential backoff; generic tool error không retry.
 
 ## 8. Verification invariants
