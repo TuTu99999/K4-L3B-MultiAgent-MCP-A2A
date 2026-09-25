@@ -15,6 +15,28 @@ ACTION_ISSUES = {
     "refund_failed",
 }
 
+ISSUE_DOMAINS = {
+    "canceled_order_paid": "order",
+    "unavailable_order_paid": "order",
+    "late_delivery_seller": "shipment",
+    "late_delivery_logistics": "shipment",
+    "valid_split_payment": "payment",
+    "payment_mismatch": "payment",
+    "duplicate_charge": "payment",
+    "refund_pending": "payment",
+    "refund_failed": "payment",
+}
+SECONDARY_PRECEDENCE = (
+    "canceled_order_paid",
+    "unavailable_order_paid",
+    "late_delivery_seller",
+    "late_delivery_logistics",
+    "refund_failed",
+    "refund_pending",
+    "duplicate_charge",
+    "payment_mismatch",
+)
+
 ISSUE_TO_TOOLS = {
     "canceled_order_paid": {
         "get_order",
@@ -411,24 +433,6 @@ def _detect_issue(
     if payment["duplicate"]:
         return "duplicate_charge", 0.98
 
-    # A payment total derived from conflicting item alternatives is weaker than
-    # an explicit shipment event. Prefer a matching, evidence-backed delivery
-    # claim before falling through to a generic arithmetic mismatch.
-    topics = {
-        claim.get("topic")
-        for claim in case.get("customer_request", {}).get("claims", [])
-        if isinstance(claim, dict)
-    }
-    if (
-        shipment["verdict"] == "seller_delay"
-        and "late_delivery_seller" in topics
-    ):
-        return "late_delivery_seller", 0.93
-    if (
-        shipment["verdict"] in {"logistics_delay", "lost", "returned"}
-        and "late_delivery_logistics" in topics
-    ):
-        return "late_delivery_logistics", 0.91
     if payment["mismatch"]:
         return "payment_mismatch", 0.95
     if shipment["verdict"] == "seller_delay":
@@ -436,6 +440,11 @@ def _detect_issue(
     if shipment["verdict"] in {"logistics_delay", "lost", "returned"}:
         return "late_delivery_logistics", 0.96
 
+    topics = {
+        claim.get("topic")
+        for claim in case.get("customer_request", {}).get("claims", [])
+        if isinstance(claim, dict)
+    }
     if payment["split"] and "valid_split_payment" in topics:
         return "valid_split_payment", 0.98
     if order and payment["has_evidence"]:
@@ -471,6 +480,24 @@ def _supported_topics(
     if shipment["verdict"] in {"logistics_delay", "lost", "returned"}:
         result.add("late_delivery_logistics")
     return result
+
+
+def _cross_domain_secondary_topics(issue: str, supported_topics: set[str]) -> list[str]:
+    primary_domain = ISSUE_DOMAINS.get(issue)
+    selected: list[str] = []
+    selected_domains: set[str] = set()
+    for topic in SECONDARY_PRECEDENCE:
+        domain = ISSUE_DOMAINS.get(topic)
+        if (
+            topic in supported_topics
+            and topic != issue
+            and domain != primary_domain
+            and domain not in selected_domains
+        ):
+            selected.append(topic)
+            if domain is not None:
+                selected_domains.add(domain)
+    return selected
 
 
 def _refs_for_tools(state: dict[str, Any], tools: set[str]) -> list[str]:
@@ -602,13 +629,13 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
     supported_topics = _supported_topics(order, payment, shipment, product_data)
     conflicts = _conflicts(items, payment["captured"])
     if any(topic != issue for topic in supported_topics):
-        confidence = min(confidence, 0.7)
+        confidence = min(confidence, 0.6)
     if any(conflict.get("selected_source") is None for conflict in conflicts):
-        confidence = min(confidence, 0.65)
+        confidence = min(confidence, 0.5)
     # The public score calibrates the primary issue as a probabilistic
     # prediction. Evidence can be authoritative while arbitration among
     # multiple simultaneously true issues remains uncertain.
-    confidence = min(confidence, 0.84)
+    confidence = min(confidence, 0.82)
 
     default_status = (
         "action_required"
@@ -643,10 +670,15 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
             if claim.get("topic") != issue
             and assessment["verdict"] in {"supported", "partially_supported"}
         ]
+        + _cross_domain_secondary_topics(issue, supported_topics)
     )[:10]
 
     primary_tools = ISSUE_TO_TOOLS.get(issue, set())
     evidence_refs = _refs_for_tools(state, set(primary_tools))
+    for secondary_issue in secondary:
+        evidence_refs.extend(
+            _refs_for_tools(state, set(ISSUE_TO_TOOLS.get(secondary_issue, set())))
+        )
     for assessment in claim_assessments:
         evidence_refs.extend(assessment["evidence_refs"])
     # Entity resolution and customer context are part of the submitted

@@ -7,7 +7,7 @@ from typing import Any
 
 from student_agent.contracts import Contracts
 from student_agent.reasoning import normalize_draft, verify_output
-from student_agent.rule_engine import generate_rule_draft
+from student_agent.rule_engine import _cross_domain_secondary_topics, generate_rule_draft
 
 
 def _evidence(tool_name: str, sequence: int, data: Any) -> dict[str, Any]:
@@ -20,6 +20,17 @@ def _evidence(tool_name: str, sequence: int, data: Any) -> dict[str, Any]:
         "data": data,
         "warnings": [],
     }
+
+
+def test_secondary_topics_include_independent_domains_but_not_derived_payment_labels() -> None:
+    supported = {"unavailable_order_paid", "duplicate_charge", "payment_mismatch"}
+
+    assert _cross_domain_secondary_topics("unavailable_order_paid", supported) == [
+        "duplicate_charge"
+    ]
+    assert _cross_domain_secondary_topics("duplicate_charge", supported) == [
+        "unavailable_order_paid"
+    ]
 
 
 def test_rule_engine_detects_actual_issue_instead_of_claim_topic() -> None:
@@ -122,7 +133,7 @@ def test_rule_engine_detects_actual_issue_instead_of_claim_topic() -> None:
         "primary_issue": "late_delivery_seller",
         "secondary_issues": ["requested_full_refund"],
         "case_status": "action_required",
-        "confidence": 0.65,
+        "confidence": 0.5,
     }
     assert output["shipment_analysis"]["late_seller_ids"] == [seller_id]
     assert output["payment_analysis"]["captured_total_brl"] == 97.0
@@ -212,7 +223,10 @@ def test_rule_engine_preserves_evidence_supported_secondary_claim() -> None:
     contracts = Contracts(Path(__file__).resolve().parents[1] / "contracts" / "schemas")
 
     assert verify_output(output, state, contracts) == []
-    assert output["assessment"]["primary_issue"] == "late_delivery_logistics"
-    assert output["assessment"]["confidence"] == 0.7
-    assert output["assessment"]["secondary_issues"] == []
+    assert output["assessment"]["primary_issue"] == "payment_mismatch"
+    assert output["assessment"]["confidence"] == 0.6
+    assert output["assessment"]["secondary_issues"] == [
+        "late_delivery_logistics",
+        "requested_full_refund",
+    ]
     assert output["claim_assessments"][0]["verdict"] == "supported"
