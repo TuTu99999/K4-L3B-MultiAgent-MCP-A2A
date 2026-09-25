@@ -20,22 +20,23 @@ REQUIRED_TOOLS = {
     "get_policy",
     "get_product_context",
     "get_refund_timeline",
-    "get_sellers",
     "get_shipment_summary",
 }
 MAX_VERIFICATION_ATTEMPTS = 2
 MAX_MCP_ATTEMPTS = 2
 SYNTHETIC_CANDIDATE_PATTERN = re.compile(r"^candidate-\d+$", re.IGNORECASE)
+PRODUCT_TOPICS = {"unavailable_order_paid"}
+SHIPMENT_TOPICS = {
+    "canceled_order_paid",
+    "late_delivery_logistics",
+    "late_delivery_seller",
+    "unsupported_claim",
+}
 REFUND_TIMELINE_TOPICS = {
     "payment_mismatch",
     "refund_failed",
     "refund_pending",
     "valid_split_payment",
-}
-SELLER_TOPICS = {
-    "canceled_order_paid",
-    "late_delivery_seller",
-    "unavailable_order_paid",
 }
 _TOOL_CACHE: WeakKeyDictionary[EvidenceGateway, tuple[str, ...]] = WeakKeyDictionary()
 
@@ -115,6 +116,29 @@ def _claim_topics(case: dict[str, Any]) -> list[str]:
         for claim in claims
         if isinstance(claim, dict) and isinstance(claim.get("topic"), str)
     ]
+
+
+def _has_capture_event(record: dict[str, Any] | None) -> bool:
+    """Return whether a payment timeline can authoritatively supply the captured total."""
+    if not record:
+        return False
+
+    def contains_valid_capture(value: Any) -> bool:
+        if isinstance(value, dict):
+            event_type = str(value.get("event_type", "")).lower()
+            status = str(value.get("status", "")).lower()
+            is_capture = any(marker in event_type for marker in ("captur", "charge", "paid"))
+            is_valid = not any(
+                marker in status for marker in ("fail", "declin", "cancel", "revers")
+            )
+            if is_capture and is_valid:
+                return True
+            return any(contains_valid_capture(child) for child in value.values())
+        if isinstance(value, list):
+            return any(contains_valid_capture(child) for child in value)
+        return False
+
+    return contains_valid_capture(record.get("data"))
 
 
 def _handoff(
@@ -304,12 +328,9 @@ async def _order_product_agent(
 ) -> None:
     order_id = state.get("order_id")
     if order_id:
-        calls = [
-            ("get_order_items", {"order_id": order_id}),
-            ("get_product_context", {"order_id": order_id}),
-        ]
-        if SELLER_TOPICS.intersection(_claim_topics(state["case"])):
-            calls.append(("get_sellers", {"order_id": order_id}))
+        calls = [("get_order_items", {"order_id": order_id})]
+        if PRODUCT_TOPICS.intersection(_claim_topics(state["case"])):
+            calls.append(("get_product_context", {"order_id": order_id}))
         await _collect_batch(
             state=state,
             gateway=gateway,
@@ -330,7 +351,7 @@ async def _shipment_agent(
     state: WorkflowState, gateway: EvidenceGateway, trace: TraceWriter
 ) -> None:
     order_id = state.get("order_id")
-    if order_id:
+    if order_id and SHIPMENT_TOPICS.intersection(_claim_topics(state["case"])):
         await _collect_evidence(
             state=state,
             gateway=gateway,
@@ -353,19 +374,27 @@ async def _payment_refund_agent(
 ) -> None:
     order_id = state.get("order_id")
     if order_id:
-        calls = [
-            ("get_order_payments", {"order_id": order_id}),
-            ("get_payment_timeline", {"order_id": order_id}),
-        ]
+        timeline_arguments = {"order_id": order_id}
+        calls = [("get_payment_timeline", timeline_arguments)]
         if REFUND_TIMELINE_TOPICS.intersection(_claim_topics(state["case"])):
             calls.append(("get_refund_timeline", {"order_id": order_id}))
-        await _collect_batch(
+        records = await _collect_batch(
             state=state,
             gateway=gateway,
             trace=trace,
             actor="payment-refund-agent",
             calls=calls,
         )
+        timeline = records.get(_cache_key("get_payment_timeline", timeline_arguments))
+        if not _has_capture_event(timeline):
+            await _collect_evidence(
+                state=state,
+                gateway=gateway,
+                trace=trace,
+                actor="payment-refund-agent",
+                tool_name="get_order_payments",
+                arguments={"order_id": order_id},
+            )
     _handoff(
         trace,
         state["case"]["case_id"],

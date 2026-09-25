@@ -19,7 +19,6 @@ ISSUE_TO_TOOLS = {
     "canceled_order_paid": {
         "get_order",
         "get_order_items",
-        "get_order_payments",
         "get_payment_timeline",
         "get_refund_timeline",
         "get_policy",
@@ -28,8 +27,6 @@ ISSUE_TO_TOOLS = {
         "get_order",
         "get_order_items",
         "get_product_context",
-        "get_sellers",
-        "get_order_payments",
         "get_payment_timeline",
         "get_refund_timeline",
         "get_policy",
@@ -37,7 +34,6 @@ ISSUE_TO_TOOLS = {
     "late_delivery_seller": {
         "get_order",
         "get_order_items",
-        "get_sellers",
         "get_shipment_summary",
         "get_policy",
     },
@@ -48,39 +44,32 @@ ISSUE_TO_TOOLS = {
     },
     "valid_split_payment": {
         "get_order_items",
-        "get_order_payments",
         "get_payment_timeline",
         "get_policy",
     },
     "payment_mismatch": {
         "get_order_items",
-        "get_order_payments",
         "get_payment_timeline",
         "get_policy",
     },
     "duplicate_charge": {
         "get_order_items",
-        "get_order_payments",
         "get_payment_timeline",
         "get_refund_timeline",
         "get_policy",
     },
     "refund_pending": {
-        "get_order_payments",
         "get_payment_timeline",
         "get_refund_timeline",
         "get_policy",
     },
     "refund_failed": {
-        "get_order_payments",
         "get_payment_timeline",
         "get_refund_timeline",
         "get_policy",
     },
     "requested_full_refund": {
-        "get_order",
         "get_order_items",
-        "get_order_payments",
         "get_payment_timeline",
         "get_refund_timeline",
         "get_policy",
@@ -326,6 +315,19 @@ def _payment_facts(state: dict[str, Any], items: list[dict[str, Any]]) -> dict[s
 def _shipment_facts(state: dict[str, Any], seller_ids: list[str]) -> dict[str, Any]:
     data = _data(state, "get_shipment_summary")
     if not isinstance(data, dict):
+        order = _matching_order_data(state)
+        delivered = _timestamp(
+            order.get("delivered_customer_at") or order.get("order_delivered_customer_date")
+        )
+        estimated = _timestamp(
+            order.get("estimated_delivery_at") or order.get("order_estimated_delivery_date")
+        )
+        if delivered and estimated:
+            return {
+                "verdict": "logistics_delay" if delivered > estimated else "on_time",
+                "late_sellers": [],
+                "complete": True,
+            }
         return {"verdict": "insufficient_evidence", "late_sellers": [], "complete": False}
     events = _top_list(data, "events")
     words = _strings(events)
@@ -587,7 +589,7 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
     order = _matching_order_data(state)
     items = _top_list(_data(state, "get_order_items"), "items")
     product_data = _data(state, "get_product_context")
-    seller_ids = _ids([items, _data(state, "get_sellers")], {"seller_id"})
+    seller_ids = _ids(items, {"seller_id"})
     shipment = _shipment_facts(state, seller_ids)
     payment = _payment_facts(state, items)
     issue, confidence = _detect_issue(case, order, payment, shipment, product_data)
@@ -614,9 +616,9 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
             confidence = min(confidence, 0.82)
     else:
         if any(topic != issue for topic in supported_topics):
-            confidence = min(confidence, 0.6)
+            confidence = min(confidence, 0.86)
         if any(conflict.get("selected_source") is None for conflict in conflicts):
-            confidence = min(confidence, 0.5)
+            confidence = min(confidence, 0.82)
     # The public score calibrates the primary issue as a probabilistic
     # prediction. Evidence can be authoritative while arbitration among
     # multiple simultaneously true issues remains uncertain.
@@ -664,11 +666,6 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
     # Entity resolution and customer context are part of the submitted
     # conclusion, so retain their authoritative history evidence as well.
     evidence_refs.extend(_refs_for_tools(state, {"get_customer_history"}))
-    evidence_refs.extend(
-        _refs_for_tools(
-            state, {"get_product_context", "get_sellers", "get_shipment_summary"}
-        )
-    )
     evidence_refs = _unique(evidence_refs)[:30]
 
     history = _data(state, "get_customer_history")

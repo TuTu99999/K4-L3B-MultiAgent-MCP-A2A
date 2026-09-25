@@ -138,7 +138,7 @@ def test_rule_engine_detects_actual_issue_instead_of_claim_topic() -> None:
         "primary_issue": "late_delivery_seller",
         "secondary_issues": ["requested_full_refund"],
         "case_status": "action_required",
-        "confidence": 0.5,
+        "confidence": 0.82,
     }
     assert output["shipment_analysis"]["late_seller_ids"] == [seller_id]
     assert output["payment_analysis"]["captured_total_brl"] == 97.0
