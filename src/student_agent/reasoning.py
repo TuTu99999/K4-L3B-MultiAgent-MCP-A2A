@@ -6,6 +6,20 @@ from typing import Any
 
 from .contracts import Contracts
 
+EXPECTED_RESPONSIBILITY = {
+    "canceled_order_paid": "platform",
+    "unavailable_order_paid": "seller",
+    "late_delivery_seller": "seller",
+    "late_delivery_logistics": "logistics_provider",
+    "valid_split_payment": "customer",
+    "payment_mismatch": "payment_provider",
+    "duplicate_charge": "payment_provider",
+    "refund_pending": "payment_provider",
+    "refund_failed": "payment_provider",
+    "unsupported_claim": "customer",
+    "insufficient_evidence": "unknown",
+}
+
 
 def _unique_strings(values: Any) -> list[str]:
     if not isinstance(values, list):
@@ -310,4 +324,20 @@ def verify_output(value: dict[str, Any], state: dict[str, Any], contracts: Contr
         late_sellers = set(shipment.get("late_seller_ids", []))
         if not late_sellers.issubset(sellers):
             errors.append("consistency:late seller must appear in affected seller_ids")
+
+    assessment = value.get("assessment", {})
+    root_cause = value.get("root_cause_analysis", {})
+    if isinstance(assessment, dict) and isinstance(root_cause, dict):
+        issue = assessment.get("primary_issue")
+        expected_party = EXPECTED_RESPONSIBILITY.get(issue)
+        parties = root_cause.get("responsible_parties", [])
+        party_types = {
+            party.get("party_type")
+            for party in parties
+            if isinstance(party, dict) and isinstance(party.get("party_type"), str)
+        }
+        if expected_party is not None and expected_party not in party_types:
+            errors.append(
+                f"consistency:{issue} requires responsible party {expected_party}"
+            )
     return errors

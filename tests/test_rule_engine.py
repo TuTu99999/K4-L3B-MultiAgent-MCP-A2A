@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -121,7 +122,7 @@ def test_rule_engine_detects_actual_issue_instead_of_claim_topic() -> None:
         "primary_issue": "late_delivery_seller",
         "secondary_issues": ["requested_full_refund"],
         "case_status": "action_required",
-        "confidence": 0.9,
+        "confidence": 0.65,
     }
     assert output["shipment_analysis"]["late_seller_ids"] == [seller_id]
     assert output["payment_analysis"]["captured_total_brl"] == 97.0
@@ -129,6 +130,15 @@ def test_rule_engine_detects_actual_issue_instead_of_claim_topic() -> None:
     assert output["claim_assessments"][0]["verdict"] == "unsupported"
     assert output["claim_assessments"][1]["verdict"] == "partially_supported"
     assert output["data_conflicts"]
+
+    inconsistent = copy.deepcopy(output)
+    inconsistent["root_cause_analysis"]["responsible_parties"] = [
+        {"party_type": "logistics_provider", "party_id": None}
+    ]
+    assert any(
+        "requires responsible party seller" in error
+        for error in verify_output(inconsistent, state, contracts)
+    )
 
 
 def test_rule_engine_preserves_evidence_supported_secondary_claim() -> None:
@@ -202,10 +212,7 @@ def test_rule_engine_preserves_evidence_supported_secondary_claim() -> None:
     contracts = Contracts(Path(__file__).resolve().parents[1] / "contracts" / "schemas")
 
     assert verify_output(output, state, contracts) == []
-    assert output["assessment"]["primary_issue"] == "payment_mismatch"
-    assert output["assessment"]["confidence"] == 0.92
-    assert output["assessment"]["secondary_issues"] == [
-        "late_delivery_logistics",
-        "requested_full_refund",
-    ]
+    assert output["assessment"]["primary_issue"] == "late_delivery_logistics"
+    assert output["assessment"]["confidence"] == 0.7
+    assert output["assessment"]["secondary_issues"] == []
     assert output["claim_assessments"][0]["verdict"] == "supported"

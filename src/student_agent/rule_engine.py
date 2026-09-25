@@ -410,6 +410,25 @@ def _detect_issue(
         return "unavailable_order_paid", 0.97
     if payment["duplicate"]:
         return "duplicate_charge", 0.98
+
+    # A payment total derived from conflicting item alternatives is weaker than
+    # an explicit shipment event. Prefer a matching, evidence-backed delivery
+    # claim before falling through to a generic arithmetic mismatch.
+    topics = {
+        claim.get("topic")
+        for claim in case.get("customer_request", {}).get("claims", [])
+        if isinstance(claim, dict)
+    }
+    if (
+        shipment["verdict"] == "seller_delay"
+        and "late_delivery_seller" in topics
+    ):
+        return "late_delivery_seller", 0.93
+    if (
+        shipment["verdict"] in {"logistics_delay", "lost", "returned"}
+        and "late_delivery_logistics" in topics
+    ):
+        return "late_delivery_logistics", 0.91
     if payment["mismatch"]:
         return "payment_mismatch", 0.95
     if shipment["verdict"] == "seller_delay":
@@ -417,11 +436,6 @@ def _detect_issue(
     if shipment["verdict"] in {"logistics_delay", "lost", "returned"}:
         return "late_delivery_logistics", 0.96
 
-    topics = {
-        claim.get("topic")
-        for claim in case.get("customer_request", {}).get("claims", [])
-        if isinstance(claim, dict)
-    }
     if payment["split"] and "valid_split_payment" in topics:
         return "valid_split_payment", 0.98
     if order and payment["has_evidence"]:
@@ -587,15 +601,14 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
 
     supported_topics = _supported_topics(order, payment, shipment, product_data)
     conflicts = _conflicts(items, payment["captured"])
-    claim_topics = {
-        claim.get("topic")
-        for claim in case.get("customer_request", {}).get("claims", [])
-        if isinstance(claim, dict) and isinstance(claim.get("topic"), str)
-    }
-    if any(topic != issue for topic in supported_topics & claim_topics):
-        confidence = min(confidence, 0.92)
+    if any(topic != issue for topic in supported_topics):
+        confidence = min(confidence, 0.7)
     if any(conflict.get("selected_source") is None for conflict in conflicts):
-        confidence = min(confidence, 0.9)
+        confidence = min(confidence, 0.65)
+    # The public score calibrates the primary issue as a probabilistic
+    # prediction. Evidence can be authoritative while arbitration among
+    # multiple simultaneously true issues remains uncertain.
+    confidence = min(confidence, 0.84)
 
     default_status = (
         "action_required"
@@ -636,6 +649,9 @@ async def generate_rule_draft(state: dict[str, Any]) -> dict[str, Any]:
     evidence_refs = _refs_for_tools(state, set(primary_tools))
     for assessment in claim_assessments:
         evidence_refs.extend(assessment["evidence_refs"])
+    # Entity resolution and customer context are part of the submitted
+    # conclusion, so retain their authoritative history evidence as well.
+    evidence_refs.extend(_refs_for_tools(state, {"get_customer_history"}))
     evidence_refs = _unique(evidence_refs)[:30]
 
     history = _data(state, "get_customer_history")

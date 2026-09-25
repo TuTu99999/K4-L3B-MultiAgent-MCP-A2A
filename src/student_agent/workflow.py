@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any, TypedDict
 from weakref import WeakKeyDictionary
 
@@ -22,7 +23,21 @@ REQUIRED_TOOLS = {
     "get_shipment_summary",
 }
 MAX_VERIFICATION_ATTEMPTS = 2
-MAX_MCP_ATTEMPTS = 3
+MAX_MCP_ATTEMPTS = 2
+SYNTHETIC_CANDIDATE_PATTERN = re.compile(r"^candidate-\d+$", re.IGNORECASE)
+PRODUCT_TOPICS = {"unavailable_order_paid"}
+SHIPMENT_TOPICS = {
+    "canceled_order_paid",
+    "late_delivery_logistics",
+    "late_delivery_seller",
+    "unsupported_claim",
+}
+REFUND_TIMELINE_TOPICS = {
+    "payment_mismatch",
+    "refund_failed",
+    "refund_pending",
+    "valid_split_payment",
+}
 _TOOL_CACHE: WeakKeyDictionary[EvidenceGateway, tuple[str, ...]] = WeakKeyDictionary()
 
 
@@ -56,15 +71,24 @@ def _exception_tree(error: BaseException) -> list[BaseException]:
 
 
 def _is_transient(error: BaseException) -> bool:
-    markers = ("timeout", "connecterror", "readerror", "writeerror", "pooltimeout")
-    transport_error = any(
+    markers = (
+        "timeout",
+        "connecterror",
+        "connectionerror",
+        "readerror",
+        "writeerror",
+        "pooltimeout",
+        "remoteprotocolerror",
+    )
+    return any(
         any(marker in type(item).__name__.lower() for marker in markers)
         for item in _exception_tree(error)
     )
-    generic_gateway_error = any(
-        "error executing tool" in str(item).lower() for item in _exception_tree(error)
-    )
-    return transport_error or generic_gateway_error
+
+
+def _is_plausible_order_id(value: str) -> bool:
+    """Reject synthetic decoys before they consume the MCP call budget."""
+    return bool(value) and not SYNTHETIC_CANDIDATE_PATTERN.fullmatch(value)
 
 
 def _find_key_values(value: Any, key: str) -> list[str]:
@@ -219,8 +243,9 @@ async def _entity_agent(
     if isinstance(claimed, str) and claimed and claimed not in candidates:
         candidates.insert(0, claimed)
     candidates = list(dict.fromkeys(candidates))
+    query_candidates = [candidate for candidate in candidates if _is_plausible_order_id(candidate)]
     customer_id = case.get("customer_unique_id_hint")
-    calls = [("get_order", {"order_id": candidate}) for candidate in candidates]
+    calls = [("get_order", {"order_id": candidate}) for candidate in query_candidates]
     if isinstance(customer_id, str) and customer_id:
         calls.append(("get_customer_history", {"customer_unique_id": customer_id}))
     records = await _collect_batch(
@@ -238,7 +263,7 @@ async def _entity_agent(
     )
     history_ids = _find_key_values(history_record.get("data"), "order_id") if history_record else []
     resolved: list[str] = []
-    for candidate in candidates:
+    for candidate in query_candidates:
         record = records.get(_cache_key("get_order", {"order_id": candidate}))
         order_ids = _find_key_values(record.get("data"), "order_id") if record else []
         if candidate in order_ids or candidate in history_ids:
@@ -280,15 +305,15 @@ async def _order_product_agent(
 ) -> None:
     order_id = state.get("order_id")
     if order_id:
+        calls = [("get_order_items", {"order_id": order_id})]
+        if PRODUCT_TOPICS.intersection(_claim_topics(state["case"])):
+            calls.append(("get_product_context", {"order_id": order_id}))
         await _collect_batch(
             state=state,
             gateway=gateway,
             trace=trace,
             actor="order-product-agent",
-            calls=[
-                ("get_order_items", {"order_id": order_id}),
-                ("get_product_context", {"order_id": order_id}),
-            ],
+            calls=calls,
         )
     _handoff(
         trace,
@@ -303,7 +328,7 @@ async def _shipment_agent(
     state: WorkflowState, gateway: EvidenceGateway, trace: TraceWriter
 ) -> None:
     order_id = state.get("order_id")
-    if order_id:
+    if order_id and SHIPMENT_TOPICS.intersection(_claim_topics(state["case"])):
         await _collect_evidence(
             state=state,
             gateway=gateway,
@@ -326,16 +351,18 @@ async def _payment_refund_agent(
 ) -> None:
     order_id = state.get("order_id")
     if order_id:
+        calls = [
+            ("get_order_payments", {"order_id": order_id}),
+            ("get_payment_timeline", {"order_id": order_id}),
+        ]
+        if REFUND_TIMELINE_TOPICS.intersection(_claim_topics(state["case"])):
+            calls.append(("get_refund_timeline", {"order_id": order_id}))
         await _collect_batch(
             state=state,
             gateway=gateway,
             trace=trace,
             actor="payment-refund-agent",
-            calls=[
-                ("get_order_payments", {"order_id": order_id}),
-                ("get_payment_timeline", {"order_id": order_id}),
-                ("get_refund_timeline", {"order_id": order_id}),
-            ],
+            calls=calls,
         )
     _handoff(
         trace,

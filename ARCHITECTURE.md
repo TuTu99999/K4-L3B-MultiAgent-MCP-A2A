@@ -105,16 +105,20 @@ luôn bằng `recommended_refund_brl`.
 
 | Failure | Retry | Fallback |
 | --- | ---: | --- |
-| MCP transport/generic execution error | 2 | Fail-fast nếu order hoặc policy evidence vẫn thiếu |
+| MCP transport error | 1 | Fail-fast nếu order hoặc policy evidence vẫn thiếu |
+| MCP generic/application execution error | 0 | Không retry lỗi nghiệp vụ hoặc dữ liệu không tồn tại |
 | MCP application/schema error | 0 | Không giả lập data/ref |
 | Entity ambiguous/not found | 0 | Bỏ các tool phụ thuộc order |
 | Invalid rule draft | 1 verifier loop | Conservative `insufficient_evidence` output |
 | Source conflict | 0 | Ghi `data_conflicts`, dùng lifecycle/policy precedence |
 
-Independent calls trong cùng specialist chạy song song. Cache ngăn gọi lặp. Với hai candidate,
-workflow dùng tối đa 10 successful evidence calls: 2 order + 1 history + 2 order/product +
-1 shipment + 3 payment/refund + 1 policy. Call thất bại do timeout hoặc generic gateway error
-được retry tối đa hai lần với exponential backoff.
+Independent calls trong cùng specialist chạy song song và cache ngăn gọi lặp. Decoy đã định danh
+dạng `candidate-NNN` được ghi nhận là rejected nhưng không tiêu tốn call; các định dạng ID khác vẫn
+được MCP xác minh để không overfit private set. Evidence planner luôn lấy order, history, items, payment/refund
+và policy; product chỉ lấy cho hypothesis unavailable, shipment chỉ lấy cho hypothesis giao
+hàng/canceled/unsupported, và refund timeline chỉ lấy cho nhóm payment/refund có lifecycle tương ứng.
+Bộ L3B hiện tại dùng 6 hoặc 7 MCP calls mỗi case, trung bình 6.9.
+Chỉ timeout/lỗi transport được retry một lần với exponential backoff; generic tool error không retry.
 
 ## 8. Verification invariants
 

@@ -21,23 +21,25 @@ def contracts() -> Contracts:
 class FakeGateway:
     def __init__(self) -> None:
         self.sequence = 0
+        self.called_tools: list[str] = []
 
     async def list_tools(self) -> list[str]:
         return sorted(workflow.REQUIRED_TOOLS)
 
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         self.sequence += 1
+        self.called_tools.append(tool_name)
         if tool_name == "get_order":
             data: Any = {"order_id": arguments["order_id"], "order_status": "delivered"}
             domain = "order"
         elif tool_name == "get_customer_history":
-            data = {"orders": [{"order_id": "ORDER_1"}]}
+            data = {"orders": [{"order_id": "a" * 32}]}
             domain = "customer"
         elif tool_name == "get_policy":
             data = {"rules": {}}
             domain = "policy"
         else:
-            data = {"order_id": "ORDER_1"}
+            data = {"order_id": "a" * 32}
             domain = tool_name.removeprefix("get_")
         return {
             "schema_version": "day09-mcp-evidence-v1",
@@ -53,12 +55,12 @@ def test_workflow_emits_valid_a2a_lifecycle_and_output(tmp_path: Path) -> None:
     trace = TraceWriter(trace_path, contracts())
     case = {
         "case_id": "CASE_001",
-        "candidate_order_ids": ["ORDER_1"],
+        "candidate_order_ids": ["a" * 32, "candidate-001"],
         "customer_unique_id_hint": "CUSTOMER_1",
         "policy_version": "EC_POLICY_V2",
         "customer_request": {
-            "claimed_order_id": "ORDER_1",
-            "claims": [{"claim_id": "CLAIM_1", "topic": "unsupported_claim"}],
+            "claimed_order_id": "a" * 32,
+            "claims": [{"claim_id": "CLAIM_1", "topic": "payment_mismatch"}],
         },
     }
     trace.emit(case_id=case["case_id"], event_type="case_received", actor="coordinator")
@@ -82,9 +84,10 @@ def test_workflow_emits_valid_a2a_lifecycle_and_output(tmp_path: Path) -> None:
     }
 
 
-def test_generic_mcp_execution_error_is_retryable() -> None:
+def test_only_transport_errors_are_retryable() -> None:
     error = RuntimeError("MCP tool failed: Error executing tool get_order")
-    assert workflow._is_transient(error)
+    assert not workflow._is_transient(error)
+    assert workflow._is_transient(TimeoutError("request timed out"))
     assert not workflow._is_transient(RuntimeError("MCP tool failed: forbidden"))
 
 
@@ -111,10 +114,31 @@ def test_workflow_fails_fast_without_order_evidence(
     trace = TraceWriter(tmp_path / "trace.jsonl", contracts())
     case = {
         "case_id": "CASE_001",
-        "candidate_order_ids": ["ORDER_1"],
+        "candidate_order_ids": ["a" * 32],
         "policy_version": "EC_POLICY_V2",
     }
 
     with pytest.raises(RuntimeError, match="MCP order evidence unavailable"):
         asyncio.run(workflow.solve_case(case, gateway, trace))
-    assert gateway.calls == workflow.MAX_MCP_ATTEMPTS
+    assert gateway.calls == 1
+
+
+def test_synthetic_order_candidate_is_rejected_without_mcp_call(tmp_path: Path) -> None:
+    gateway = FakeGateway()
+    trace = TraceWriter(tmp_path / "trace.jsonl", contracts())
+    case = {
+        "case_id": "CASE_001",
+        "candidate_order_ids": ["a" * 32, "candidate-001"],
+        "customer_unique_id_hint": "CUSTOMER_1",
+        "policy_version": "EC_POLICY_V2",
+        "customer_request": {
+            "claimed_order_id": "a" * 32,
+            "claims": [{"claim_id": "CLAIM_1", "topic": "unsupported_claim"}],
+        },
+    }
+
+    output = asyncio.run(workflow.solve_case(case, gateway, trace))
+
+    assert "candidate-001" in output["entity_resolution"]["rejected_candidates"]
+    assert gateway.sequence == 7
+    assert "get_refund_timeline" not in gateway.called_tools
