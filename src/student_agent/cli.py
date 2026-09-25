@@ -9,7 +9,7 @@ from pathlib import Path
 from .cases import load_case_set
 from .config import Settings
 from .contracts import Contracts
-from .mcp_gateway import connect_gateway
+from .mcp_gateway_v2 import connect_gateway
 from .submission import package_submission, validate_artifacts
 from .trace import TraceWriter
 from .workflow import solve_case
@@ -44,7 +44,9 @@ async def _run(root: Path) -> None:
         discovered_tools = await gateway.list_tools()
         if not discovered_tools:
             raise RuntimeError("MCP Gateway returned no tools")
-        for case_id in case_set.case_ids:
+        total_cases = len(case_set.case_ids)
+        for index, case_id in enumerate(case_set.case_ids, start=1):
+            print(f"[{index}/{total_cases}] {case_id}: running", flush=True)
             case = case_set.cases[case_id]
             trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
             output = await solve_case(case, gateway, trace)
@@ -58,6 +60,7 @@ async def _run(root: Path) -> None:
             )
             temporary.replace(target)
             trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
+            print(f"[{index}/{total_cases}] {case_id}: done", flush=True)
 
 
 def parser() -> argparse.ArgumentParser:

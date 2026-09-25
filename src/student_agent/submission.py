@@ -65,6 +65,7 @@ def validate_artifacts(
         raise ValueError("traces/trace.jsonl is missing or not UTF-8") from exc
     normalized_lines: list[str] = []
     seen_events: set[str] = set()
+    events_by_case: dict[str, list[dict[str, Any]]] = {case_id: [] for case_id in case_set.case_ids}
     for number, line in enumerate(trace_lines, 1):
         if not line.strip():
             continue
@@ -78,12 +79,75 @@ def validate_artifacts(
         if event["event_id"] in seen_events:
             raise ValueError(f"traces/trace.jsonl:{number}: duplicate event_id")
         seen_events.add(event["event_id"])
+        events_by_case[event["case_id"]].append(event)
         normalized_lines.append(json.dumps(event, ensure_ascii=False, separators=(",", ":")))
+
+    _validate_lifecycle(root, outputs, events_by_case)
 
     serialized = [json.dumps(value, ensure_ascii=False) for value in outputs.values()]
     if SECRET_PATTERN.search("\n".join([*serialized, *normalized_lines])):
         raise ValueError("a Team API Key appears in output or trace")
     return outputs, normalized_lines
+
+
+def _validate_lifecycle(
+    root: Path,
+    outputs: dict[str, dict[str, Any]],
+    events_by_case: dict[str, list[dict[str, Any]]],
+) -> None:
+    scoring_policy = _json_object(root / "contracts" / "scoring" / "scoring-policy-v2.json")
+    official_required = scoring_policy.get("workflow_required_events")
+    if not isinstance(official_required, list):
+        raise ValueError("scoring policy has invalid workflow_required_events")
+    required = [*official_required, "policy_decided"]
+
+    for case_id, output in outputs.items():
+        events = events_by_case[case_id]
+        positions: dict[str, list[int]] = {}
+        for index, event in enumerate(events):
+            positions.setdefault(event["event_type"], []).append(index)
+        missing = [event_type for event_type in required if event_type not in positions]
+        if missing:
+            raise ValueError(f"trace for {case_id} is missing lifecycle events: {missing}")
+        singleton_events = (
+            "case_received",
+            "policy_decided",
+            "verification_completed",
+            "case_finalized",
+        )
+        duplicates = [
+            event_type for event_type in singleton_events if len(positions.get(event_type, [])) != 1
+        ]
+        if duplicates:
+            raise ValueError(f"trace for {case_id} has duplicate lifecycle events: {duplicates}")
+
+        received = positions["case_received"][0]
+        first_task = positions["task_assigned"][0]
+        first_handoff = positions["handoff"][0]
+        policy = positions["policy_decided"][0]
+        verification = positions["verification_completed"][0]
+        finalized = positions["case_finalized"][0]
+        if not received < first_task <= first_handoff < policy < verification < finalized:
+            raise ValueError(f"trace for {case_id} has invalid lifecycle ordering")
+        if finalized != len(events) - 1:
+            raise ValueError(f"trace for {case_id} must end with case_finalized")
+
+        consumed_refs = {
+            ref
+            for event in events
+            if event["event_type"] == "tool_result_consumed"
+            for ref in event.get("evidence_refs", [])
+        }
+        output_refs = set(output["evidence_refs"])
+        unlinked = sorted(output_refs - consumed_refs)
+        if unlinked:
+            raise ValueError(
+                f"trace for {case_id} does not consume output evidence refs: {unlinked}"
+            )
+        if output_refs:
+            tool_positions = positions.get("tool_result_consumed", [])
+            if not tool_positions or not first_task < tool_positions[0] < policy:
+                raise ValueError(f"trace for {case_id} has invalid tool evidence lifecycle")
 
 
 def package_submission(root: Path, destination: Path) -> Path:

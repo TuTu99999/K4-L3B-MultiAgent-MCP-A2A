@@ -25,6 +25,15 @@ python -m pip install -e ".[dev]"
 cp .env.example .env
 ```
 
+Trên Windows PowerShell:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+Copy-Item .env.example .env
+```
+
 Kiểm tra:
 
 ```bash
@@ -46,6 +55,9 @@ COMPETITION_API_URL=http://127.0.0.1:8081
 COMPETITION_TEAM_API_KEY=sk-team-your_key
 MCP_ENDPOINT=http://127.0.0.1:8001/mcp
 ```
+
+Workflow chấm bài chạy hoàn toàn bằng rule engine deterministic, không cần Ollama, Qwen hay
+OpenRouter. `day09 run` không gửi case/evidence tới dịch vụ LLM và không phát sinh token cost.
 
 ## 3. Tải input
 
@@ -159,6 +171,11 @@ traces/trace.jsonl
 ```
 
 Nếu output pass schema nhưng điểm thấp, cần kiểm tra semantic, entity resolution, evidence, consistency, confidence, workflow và số MCP calls.
+
+Lệnh `day09 validate` còn kiểm tra lifecycle theo scoring policy, thứ tự receive/finalize,
+`policy_decided` và việc mọi `evidence_ref` trong output đã có `tool_result_consumed` trong đúng
+case. Verifier kiểm tra deterministic issue–responsibility, shipment/payment verdict, tổng refund,
+nguồn gốc số tiền từ MCP và hạ confidence khi evidence thiếu hoặc mâu thuẫn.
 
 ## 7. Đóng gói và nộp bài
 
